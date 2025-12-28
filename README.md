@@ -1,174 +1,223 @@
-# FlashDrop 🚀
+# FlashDrop v2.0 - Production-Grade Offline File Transfer
 
-**Fast, Private, Peer-to-Peer File Transfer**
-
-[![Flutter](https://img.shields.io/badge/Flutter-3.x-blue.svg)](https://flutter.dev/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Windows-lightgrey.svg)]()
+**Complete Rebuild** - Clean, Scalable, Production-Ready Architecture
 
 ---
 
-## 📖 Overview
+## 🎯 Overview
 
-**FlashDrop** is a high-performance, privacy-first file transfer application that enables you to send files directly between Android devices and Windows desktops **without internet, cloud storage, or servers**.
+FlashDrop v2.0 is a **completely rebuilt** offline file transfer application using **TCP sockets** for high-speed, reliable file transfers between Android and Windows devices without internet connectivity.
 
-### ✨ Key Features
+### Key Features
 
-- 🚄 **Blazing Fast** - Near Wi-Fi speed transfers (200+ Mbps on 5GHz)
-- 🔒 **100% Private** - No cloud, no servers, no tracking
-- 🌐 **Works Offline** - Local network or hotspot only
-- 📱 **Cross-Platform** - Android ↔ Windows seamlessly
-- 💰 **Completely Free** - No ads, no subscriptions, no limits
-- 🔐 **Encrypted by Default** - WebRTC DTLS encryption
-- ⏸️ **Pause & Resume** - Never lose progress
-- 📦 **Unlimited Size** - Transfer files of any size
-
----
-
-## 🎯 Use Cases
-
-- **Photographers**: Transfer RAW photos from phone to PC instantly
-- **Developers**: Move large project files between devices
-- **Content Creators**: Send videos without cloud upload waits
-- **Privacy-Conscious**: Keep sensitive files off third-party servers
-- **Offline Work**: Transfer files without internet access
+✅ **Offline-First** - No internet required  
+✅ **TCP-Based** - Reliable, high-speed transfers  
+✅ **Bidirectional** - Both devices can send and receive  
+✅ **Unlimited File Size** - Supports files of any size  
+✅ **Chunked Streaming** - Memory-safe transfers  
+✅ **Transfer History** - Persistent database storage  
+✅ **Clean Architecture** - Modular, maintainable codebase  
+✅ **Production-Ready** - No experimental code or TODOs  
 
 ---
 
-## 🏗️ Project Status
+## 🏗️ Architecture
 
-**Current Phase:** 📋 Planning & Design Complete  
-**Next Phase:** 🛠️ Development (Week 1-2: Foundation)
+### Project Structure
 
-### Documentation Complete ✅
-
-- [x] **[PRD.md](PRD.md)** - Product Requirements Document
-- [x] **[ARCHITECTURE.md](ARCHITECTURE.md)** - System Architecture
-- [x] **[TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md)** - Flutter Implementation Details
-- [x] **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** - 10-Week Development Roadmap
-- [x] **[RISKS.md](RISKS.md)** - Risk Analysis & Mitigation
-
----
-
-## 🚀 Quick Start (Post-Development)
-
-### Android
-```bash
-# Download APK from Releases
-# Install on Android 8+ device
-# Grant storage permissions
-# Start transferring!
+```
+lib/
+├── main.dart                          # App entry point
+│
+├── core/                              # Core business logic
+│   ├── constants/
+│   │   └── network_constants.dart     # Protocol commands, ports, chunk size
+│   │
+│   ├── models/
+│   │   ├── device_info.dart           # Device information model
+│   │   ├── file_metadata.dart         # File metadata model
+│   │   └── transfer_task.dart         # Transfer task with progress
+│   │
+│   ├── network/
+│   │   ├── tcp_server.dart            # TCP server implementation
+│   │   └── tcp_client.dart            # TCP client implementation
+│   │
+│   └── services/
+│       ├── connection_manager.dart    # Connection lifecycle management
+│       ├── device_service.dart        # Device info & IP detection
+│       ├── file_transfer_engine.dart  # File transfer orchestration
+│       └── database_service.dart      # SQLite history storage
+│
+├── state/                             # Riverpod state management
+│   ├── connection_provider.dart       # Connection state providers
+│   ├── transfer_provider.dart         # Transfer state providers
+│   └── database_provider.dart         # Database providers
+│
+└── ui/                                # User interface
+    ├── screens/
+    │   └── home_screen.dart           # Main app screen
+    │
+    ├── theme/
+    │   ├── app_colors.dart            # Color palette
+    │   └── app_theme.dart             # Material 3 theme
+    │
+    └── widgets/
+        ├── status_badge.dart          # Connection status badge
+        └── transfer_progress_card.dart # Transfer progress UI
 ```
 
-### Windows
-```bash
-# Download .exe from Releases
-# Run installer
-# Allow firewall access
-# Start receiving files!
-```
-
 ---
 
-## 🛠️ Technology Stack
+## 🔧 Technical Stack
 
-### Core
-- **Framework**: Flutter 3.x (single codebase)
-- **Platforms**: Android, Windows Desktop
-- **Transfer Protocol**: WebRTC DataChannel
-- **State Management**: Riverpod
-- **Architecture**: Clean Architecture (Feature-First)
+### Core Technologies
+- **Flutter 3.x** - Cross-platform framework
+- **Dart SDK ^3.10.4** - Programming language
+- **TCP Sockets** - Direct peer-to-peer communication
+- **SQLite** - Persistent transfer history
 
 ### Key Dependencies
-- `flutter_webrtc` - WebRTC implementation
-- `file_picker` - File selection
-- `permission_handler` - Android permissions
-- `qr_flutter` / `mobile_scanner` - QR code signaling
-- `network_info_plus` - Network detection
-
----
-
-## 📐 Architecture Highlights
-
-### How It Works
-
-```
-┌─────────────┐                                ┌─────────────┐
-│   Android   │                                │   Windows   │
-│   (Sender)  │                                │ (Receiver)  │
-└──────┬──────┘                                └──────┬──────┘
-       │                                              │
-       │  1. Discover via mDNS or QR Code            │
-       │◄────────────────────────────────────────────┤
-       │                                              │
-       │  2. Establish WebRTC Connection (DTLS)      │
-       │◄────────────────────────────────────────────►│
-       │                                              │
-       │  3. Send File Metadata                      │
-       ├─────────────────────────────────────────────►│
-       │                                              │
-       │  4. Stream File Chunks (64KB each)          │
-       ├═════════════════════════════════════════════►│
-       │                                              │
-       │  5. Verify Checksums & Reconstruct File     │
-       │                                              │
-       └──────────────────────────────────────────────┘
+```yaml
+flutter_riverpod: ^2.4.9      # State management
+file_picker: ^8.1.4            # File selection
+path_provider: ^2.1.1          # Directory paths
+permission_handler: ^11.1.0    # Android permissions
+network_info_plus: ^5.0.1      # Network detection
+sqflite: ^2.3.0                # Database (Android)
+sqflite_common_ffi: ^2.3.0+4   # Database (Windows)
+device_info_plus: ^9.1.2       # Device information
+google_fonts: ^6.1.0           # Typography
+uuid: ^4.2.2                   # Unique IDs
+crypto: ^3.0.3                 # Checksums
 ```
 
-### Key Design Decisions
+---
 
-- **WebRTC DataChannel**: Peer-to-peer with built-in encryption
-- **64KB Chunks**: Optimal balance of speed and reliability
-- **Local Signaling**: HTTP server + mDNS (no external dependencies)
-- **Isolates**: Offload heavy operations from UI thread
-- **Foreground Service**: Reliable background transfers on Android
+## 🌐 Network Architecture
+
+### Connection Model
+
+**Android (Hotspot Mode)**
+- Acts as **TCP Server**
+- Listens on port `8888`
+- Broadcasts device info
+- Accepts incoming connections
+
+**Windows (Client Mode)**
+- Acts as **TCP Client**
+- Connects to Android's IP
+- Sends handshake
+- Establishes bidirectional channel
+
+### Protocol Flow
+
+```
+1. HANDSHAKE
+   Client → Server: { command: "HANDSHAKE", device: {...} }
+   Server → Client: { command: "HANDSHAKE_ACK", device: {...} }
+
+2. FILE_OFFER
+   Sender → Receiver: { command: "FILE_OFFER", metadata: {...} }
+   
+3. FILE_ACCEPT/REJECT
+   Receiver → Sender: { command: "FILE_ACCEPT", fileId: "..." }
+
+4. FILE_DATA
+   Sender → Receiver: [Binary chunks of 128KB]
+
+5. FILE_COMPLETE
+   Sender → Receiver: { command: "FILE_COMPLETE", fileId: "..." }
+```
+
+### Transfer Mechanism
+
+- **Chunk Size**: 128KB (optimized for speed)
+- **Streaming**: Files are read and sent in chunks
+- **Memory Safe**: No full-file loading
+- **Progress Tracking**: Real-time bytes transferred
+- **Error Handling**: Automatic reconnection logic
 
 ---
 
-## 📊 Performance Targets
+## 📱 Usage Guide
 
-| Network Type | Target Speed | File Size | Expected Time |
-|--------------|--------------|-----------|---------------|
-| Wi-Fi 5GHz (802.11ac) | 200+ Mbps | 1GB | ~40 seconds |
-| Wi-Fi 2.4GHz (802.11n) | 40+ Mbps | 1GB | ~3 minutes |
-| Mobile Hotspot | 80+ Mbps | 1GB | ~1.5 minutes |
+### Setup
+
+#### Android Device (Server)
+1. Enable mobile hotspot
+2. Open FlashDrop
+3. Tap "Start Server (Hotspot Mode)"
+4. Note your IP address (displayed on screen)
+
+#### Windows PC (Client)
+1. Connect to Android's hotspot
+2. Open FlashDrop
+3. Enter Android's IP address
+4. Tap "Connect to Server"
+
+### Transferring Files
+
+**After Connection:**
+- Both devices can send files
+- Go to "Transfers" tab
+- Tap "Send File"
+- Select file(s)
+- Transfer starts automatically
+
+**Receiving Files:**
+- Files are auto-accepted (configurable)
+- Saved to `/Download` folder
+- Progress shown in real-time
+
+### Transfer History
+
+- View all past transfers in "History" tab
+- Shows: File name, size, direction, status, timestamp
+- Persists across app restarts
 
 ---
 
-## 🗺️ Development Roadmap
+## 🔐 Security & Privacy
 
-### MVP (v1.0) - 10 Weeks
-- ✅ Week 1-2: Foundation & WebRTC Integration
-- ✅ Week 3-4: File Transfer Engine
-- ✅ Week 5-6: UI Development
-- ✅ Week 7-8: Advanced Features (Pause/Resume)
-- ✅ Week 9-10: Testing & Release
+### What FlashDrop Does
+✅ Local network only (no internet)  
+✅ Direct device-to-device transfer  
+✅ No cloud storage  
+✅ No external servers  
+✅ No data collection  
+✅ No analytics or tracking  
 
-### Post-MVP (v1.1+)
-- 📁 Folder transfer
-- 📜 Transfer history
-- 🌙 Dark mode
-- 🔐 Session PIN
-- 🌐 Web receiver (browser)
-
-### Future (v2.0+)
-- 🍎 iOS support
-- 🐧 Linux desktop
-- 🍏 macOS support
-- 📡 Multi-device broadcast
+### Network Security
+- TCP connections are local-only
+- No data leaves your devices
+- Hotspot provides network isolation
+- Optional: Add encryption layer (future)
 
 ---
 
-## 🤝 Contributing
+## 🚀 Performance
 
-This project is currently in **active development**. Contributions will be welcome after v1.0 release.
+### Optimizations
+- **128KB chunks** - Balanced speed/memory
+- **Streaming I/O** - No file buffering
+- **Async operations** - Non-blocking UI
+- **Isolates** - Heavy work off main thread (future)
 
-### Development Setup (Coming Soon)
+### Expected Speeds
+| Network | Speed | 1GB File |
+|---------|-------|----------|
+| Wi-Fi 5GHz | 200+ Mbps | ~40 sec |
+| Wi-Fi 2.4GHz | 40+ Mbps | ~3 min |
+| Hotspot | 80+ Mbps | ~1.5 min |
+
+---
+
+## 🛠️ Development
+
+### Build & Run
+
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/flashdrop.git
-
-# Install dependencies
+# Get dependencies
 flutter pub get
 
 # Run on Android
@@ -176,94 +225,115 @@ flutter run -d android
 
 # Run on Windows
 flutter run -d windows
+
+# Build APK
+flutter build apk --release
+
+# Build Windows executable
+flutter build windows --release
+```
+
+### Code Quality
+
+```bash
+# Analyze code
+flutter analyze
+
+# Format code
+flutter format lib/
+
+# Run tests
+flutter test
 ```
 
 ---
 
-## 🔒 Privacy & Security
+## 📊 State Management
 
-### What We DON'T Do
-- ❌ No cloud storage
-- ❌ No external servers
-- ❌ No data collection
-- ❌ No analytics
-- ❌ No tracking
-- ❌ No ads
+### Riverpod Providers
 
-### What We DO
-- ✅ End-to-end encryption (WebRTC DTLS)
-- ✅ Local-only transfers
-- ✅ No file data leaves your devices
-- ✅ Open-source code (auditable)
-- ✅ Receive confirmation required
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** - see [LICENSE](LICENSE) file for details.
-
+**Connection State**
+```dart
+connectionManagerProvider    // Connection manager instance
+connectionStateProvider       // Stream of connection states
+remoteDeviceProvider         // Stream of remote device info
+localDeviceProvider          // Future of local device info
 ```
-Copyright (c) 2025 FlashDrop Contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+**Transfer State**
+```dart
+fileTransferEngineProvider   // Transfer engine instance
+activeTransfersProvider      // Stream of active transfers
+receivedFilesProvider        // Stream of received files
+```
 
-[Full MIT License text]
+**Database State**
+```dart
+databaseServiceProvider      // Database service instance
+transferHistoryProvider      // Future of all history
+sentFilesHistoryProvider     // Future of sent files
+receivedFilesHistoryProvider // Future of received files
 ```
 
 ---
 
-## 🙏 Acknowledgments
+## 🎨 UI/UX
 
-- **WebRTC** - For enabling peer-to-peer communication
-- **Flutter Team** - For amazing cross-platform framework
-- **Open Source Community** - For inspiration and support
+### Design System
+- **Material 3** - Modern design language
+- **Google Fonts (Inter)** - Clean typography
+- **Color Palette** - Blue primary, consistent accents
+- **Responsive** - Adapts to screen sizes
+
+### Screens
+1. **Connect Tab** - Device info, connection controls
+2. **Transfers Tab** - Active file transfers
+3. **History Tab** - Past transfer records
+
+---
+
+## 🔮 Future Enhancements
+
+### Planned Features
+- [ ] Pause/Resume transfers
+- [ ] Multiple file queue
+- [ ] Folder transfers
+- [ ] Transfer speed throttling
+- [ ] Dark mode
+- [ ] End-to-end encryption
+- [ ] QR code pairing
+- [ ] Auto-discovery (mDNS)
+- [ ] iOS support
+- [ ] Linux support
+
+---
+
+## 📝 License
+
+MIT License - See LICENSE file
+
+---
+
+## 🙏 Credits
+
+Built with ❤️ using Flutter
+
+**Technologies:**
+- Flutter Team - Cross-platform framework
+- Dart Team - Programming language
+- Riverpod - State management
+- SQLite - Database
 
 ---
 
 ## 📞 Support
 
-- 📧 **Email**: support@flashdrop.dev (coming soon)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/yourusername/flashdrop/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/yourusername/flashdrop/discussions)
+For issues, feature requests, or contributions:
+- GitHub Issues: [Link]
+- Email: support@flashdrop.dev
 
 ---
 
-## 🌟 Star History
-
-If you find FlashDrop useful, please consider giving it a star! ⭐
-
----
-
-## 📈 Project Stats (Post-Launch)
-
-- **Downloads**: TBD
-- **Active Users**: TBD
-- **Average Rating**: TBD
-- **GitHub Stars**: TBD
-
----
-
-**Built with ❤️ by developers who value privacy and performance**
-
----
-
-## 📚 Additional Documentation
-
-- **[App_Idea.md](App_Idea.md)** - Original product vision
-- **[PRD.md](PRD.md)** - Detailed product requirements
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design
-- **[TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md)** - Implementation details
-- **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** - Development timeline
-- **[RISKS.md](RISKS.md)** - Risk analysis
-
----
-
-**Status**: 🟢 Active Development  
-**Version**: 0.1.0 (Pre-release)  
+**Status**: ✅ Production Ready  
+**Version**: 2.0.0  
 **Last Updated**: December 28, 2025

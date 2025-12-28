@@ -3,8 +3,6 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
-  desktop_drop
-  flutter_webrtc
   permission_handler_windows
 )
 

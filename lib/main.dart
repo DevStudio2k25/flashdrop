@@ -1,15 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'shared/theme/app_theme.dart';
-import 'features/home/presentation/screens/main_transfer_screen.dart';
-import 'core/utils/debug_helper.dart';
+import 'ui/theme/app_theme.dart';
+import 'ui/screens/home_screen.dart';
 
 void main() {
-  // Initialize debug helper for testing
-  final debugHelper = DebugHelper();
-  debugHelper.setDebugMode(true);
-  debugHelper.printDebugBanner();
-
   runApp(const ProviderScope(child: FlashDropApp()));
 }
 
@@ -22,7 +16,7 @@ class FlashDropApp extends StatelessWidget {
       title: 'FlashDrop',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: const MainTransferScreen(),
+      home: const HomeScreen(),
     );
   }
 }
