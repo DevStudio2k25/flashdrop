@@ -5,10 +5,11 @@ import '../network/tcp_server.dart';
 import '../network/tcp_client.dart';
 import '../services/device_service.dart';
 import '../services/network_scanner.dart';
+import '../services/discovery_service.dart';
 import '../constants/network_constants.dart';
 
 /// Connection state
-enum ConnectionState { disconnected, connecting, connected, error }
+enum ConnectionState { disconnected, connecting, connected, error, listening }
 
 /// Connection manager - handles TCP connections
 class ConnectionManager {
@@ -18,6 +19,7 @@ class ConnectionManager {
 
   final DeviceService _deviceService = DeviceService();
   final NetworkScanner _networkScanner = NetworkScanner();
+  final DiscoveryService _discoveryService = DiscoveryService();
 
   TcpServer? _server;
   TcpClient? _client;
@@ -58,6 +60,14 @@ class ConnectionManager {
   /// Stream of discovered IPs
   Stream<List<String>> get onIPsDiscovered => _networkScanner.onIPsFound;
 
+  /// Stream of discovered devices (UDP)
+  final _messageController = StreamController<Map<String, dynamic>>.broadcast();
+
+  /// Stream of all incoming messages (Client or Server)
+  Stream<Map<String, dynamic>> get messageStream => _messageController.stream;
+
+  Stream<DeviceInfo> get onDeviceFound => _discoveryService.onDeviceFound;
+
   /// Initialize connection manager
   Future<void> initialize() async {
     try {
@@ -65,6 +75,16 @@ class ConnectionManager {
       debugPrint(
         '✅ [ConnectionManager] Initialized with device: $_localDevice',
       );
+      _updateState(_state); // Emit initial state
+
+      // Listen for UDP discoveries and add to scanner list transparently
+      _discoveryService.onDeviceFound.listen((device) {
+        debugPrint(
+          '🪄 [ConnectionManager] Magic Packet found device: ${device.name} @ ${device.ipAddress}',
+        );
+        // We can expose this via a separate stream or just auto-add to the existing IP list for UI compat
+        _networkScanner.addDiscoveredIp(device.ipAddress);
+      });
     } catch (e) {
       debugPrint('❌ [ConnectionManager] Initialization failed: $e');
       _updateState(ConnectionState.error);
@@ -105,7 +125,11 @@ class ConnectionManager {
         _handleServerMessage(message);
       });
 
-      // No broadcasting needed for network scanner
+      // Start UDP Broadcast (Magic Packet)
+      await _discoveryService.startBroadcasting(_localDevice!);
+
+      // Update state to listening
+      _updateState(ConnectionState.listening);
 
       debugPrint('✅ [ConnectionManager] Server started successfully');
     } catch (e) {
@@ -124,7 +148,13 @@ class ConnectionManager {
 
     try {
       debugPrint('🔍 [ConnectionManager] Starting network scan...');
+
+      // Start UDP Listen (Magic Packet Listener)
+      _discoveryService.startListening();
+
+      // Also start legacy scan (just in case)
       await _networkScanner.scanNetwork();
+
       debugPrint('✅ [ConnectionManager] Network scan started');
     } catch (e) {
       debugPrint('❌ [ConnectionManager] Network scan failed: $e');
@@ -179,6 +209,8 @@ class ConnectionManager {
 
   /// Handle server-side messages
   void _handleServerMessage(Map<String, dynamic> message) {
+    _messageController.add(message); // Forward to global stream
+
     final command = message['command'] as String?;
 
     switch (command) {
@@ -186,12 +218,14 @@ class ConnectionManager {
         _handleHandshake(message);
         break;
       default:
-        debugPrint('⚠️ [ConnectionManager] Unknown command: $command');
+      // Other commands handled by listeners (e.g. FileTransferEngine)
     }
   }
 
   /// Handle client-side messages
   void _handleClientMessage(Map<String, dynamic> message) {
+    _messageController.add(message); // Forward to global stream
+
     final command = message['command'] as String?;
 
     switch (command) {
@@ -199,7 +233,7 @@ class ConnectionManager {
         _handleHandshakeAck(message);
         break;
       default:
-        debugPrint('⚠️ [ConnectionManager] Unknown command: $command');
+      // Other commands handled by listeners
     }
   }
 
@@ -245,6 +279,7 @@ class ConnectionManager {
       await _client?.disconnect();
       await _server?.stop();
       _networkScanner.stop();
+      _discoveryService.stop(); // Stop UDP
 
       _client = null;
       _server = null;

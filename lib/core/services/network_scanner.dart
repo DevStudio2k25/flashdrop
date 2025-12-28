@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import '../constants/network_constants.dart';
 
 /// Simple network scanner to find devices on same subnet
 class NetworkScanner {
@@ -18,63 +19,70 @@ class NetworkScanner {
 
   /// Scan local network for devices
   Future<void> scanNetwork() async {
-    if (_isScanning) {
-      debugPrint('⚠️ [NetworkScanner] Already scanning');
-      return;
-    }
+    if (_isScanning) return;
 
     _isScanning = true;
     _discoveredIPs.clear();
 
     try {
-      debugPrint('🔍 [NetworkScanner] Starting network scan...');
+      debugPrint(
+        '🔍 [NetworkScanner] Starting full subnet scan (192.168.x.x)...',
+      );
 
-      // Get local IP
       final localIP = await _getLocalIP();
       if (localIP == null) {
-        debugPrint('❌ [NetworkScanner] Could not get local IP');
+        debugPrint('❌ [NetworkScanner] No valid 192.168.x.x IP found');
         _isScanning = false;
         return;
       }
 
-      debugPrint('📱 [NetworkScanner] Local IP: $localIP');
-
-      // Extract subnet (e.g., 192.168.43.x)
       final parts = localIP.split('.');
-      if (parts.length != 4) {
-        debugPrint('❌ [NetworkScanner] Invalid IP format');
+      final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+
+      // Prioritize Gateway (likely .1)
+      final gatewayIP = '$subnet.1';
+      if (await _pingIP(gatewayIP, NetworkConstants.defaultPort)) {
+        debugPrint('✅ [NetworkScanner] Found Gateway: $gatewayIP');
+        _discoveredIPs.add(gatewayIP);
+        _scanController.add(_discoveredIPs);
         _isScanning = false;
-        return;
+        return; // Stop if we found the gateway (most likely target)
       }
 
-      final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-      debugPrint('🌐 [NetworkScanner] Scanning subnet: $subnet.x');
+      // Scan the rest efficiently (Batch of 50)
+      final allIPs = List.generate(254, (i) => '$subnet.${i + 1}')
+          .where(
+            (ip) => ip != localIP && ip != gatewayIP,
+          ) // Skip self and gateway (already checked)
+          .toList();
 
-      // Scan common IPs (1, 2, 100-110 for hotspot range)
-      final ipsToScan = [
-        '$subnet.1', // Common hotspot IP
-        '$subnet.2',
-        ...List.generate(11, (i) => '$subnet.${100 + i}'), // 100-110
-      ];
+      const int batchSize = 50;
+      for (var i = 0; i < allIPs.length; i += batchSize) {
+        if (!_isScanning) break; // Allow cancellation
 
-      // Scan in parallel (faster)
-      final futures = ipsToScan.map((ip) => _pingIP(ip, 8888));
-      final results = await Future.wait(futures);
+        final end = (i + batchSize < allIPs.length)
+            ? i + batchSize
+            : allIPs.length;
+        final batch = allIPs.sublist(i, end);
 
-      for (int i = 0; i < results.length; i++) {
-        if (results[i]) {
-          final ip = ipsToScan[i];
-          if (!_discoveredIPs.contains(ip)) {
-            _discoveredIPs.add(ip);
-            debugPrint('✅ [NetworkScanner] Found device: $ip');
-            _scanController.add(_discoveredIPs);
+        final futures = batch.map(
+          (ip) => _pingIP(ip, NetworkConstants.defaultPort),
+        );
+        final results = await Future.wait(futures);
+
+        for (int k = 0; k < results.length; k++) {
+          if (results[k]) {
+            final ip = batch[k];
+            if (!_discoveredIPs.contains(ip)) {
+              _discoveredIPs.add(ip);
+              debugPrint('✅ [NetworkScanner] Found: $ip');
+              _scanController.add(_discoveredIPs);
+            }
           }
         }
       }
 
-      debugPrint(
-        '🎯 [NetworkScanner] Scan complete. Found ${_discoveredIPs.length} devices',
-      );
+      debugPrint('🎯 [NetworkScanner] Scan complete.');
     } catch (e) {
       debugPrint('❌ [NetworkScanner] Scan failed: $e');
     } finally {
@@ -82,25 +90,22 @@ class NetworkScanner {
     }
   }
 
-  /// Get local IP address
+  /// Get local IP address (Strict 192.168.x.x)
   Future<String?> _getLocalIP() async {
     try {
-      final interfaces = await NetworkInterface.list();
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        type: InternetAddressType.IPv4,
+      );
       for (var interface in interfaces) {
         for (var addr in interface.addresses) {
-          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-            // Skip if it's not a local network IP
-            final ip = addr.address;
-            if (ip.startsWith('192.168.') ||
-                ip.startsWith('10.') ||
-                ip.startsWith('172.')) {
-              return ip;
-            }
+          if (addr.address.startsWith('192.168.')) {
+            return addr.address;
           }
         }
       }
     } catch (e) {
-      debugPrint('❌ [NetworkScanner] Failed to get local IP: $e');
+      // Ignore
     }
     return null;
   }
@@ -117,6 +122,15 @@ class NetworkScanner {
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /// Add a discovered IP manually (e.g. from UDP Discovery)
+  void addDiscoveredIp(String ip) {
+    if (!_discoveredIPs.contains(ip)) {
+      _discoveredIPs.add(ip);
+      _scanController.add(_discoveredIPs);
+      debugPrint('➕ [NetworkScanner] Added UDP Discovered IP: $ip');
     }
   }
 

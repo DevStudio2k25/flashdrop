@@ -3,8 +3,16 @@ import '../core/services/connection_manager.dart';
 import '../core/models/device_info.dart';
 
 /// Connection manager provider
+import '../core/services/device_service.dart';
+
+/// Connection manager provider
 final connectionManagerProvider = Provider<ConnectionManager>((ref) {
   return ConnectionManager();
+});
+
+/// Device Service Provider
+final deviceServiceProvider = Provider<DeviceService>((ref) {
+  return DeviceService();
 });
 
 /// Connection state provider

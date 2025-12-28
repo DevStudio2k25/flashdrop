@@ -53,13 +53,8 @@ class FileTransferEngine {
   Future<void> initialize() async {
     debugPrint('🔧 [FileTransferEngine] Initializing...');
 
-    // Listen for incoming messages from server
-    _connectionManager.server?.onMessage.listen((message) {
-      _handleIncomingMessage(message);
-    });
-
-    // Listen for incoming messages from client
-    _connectionManager.client?.onMessage.listen((message) {
+    // Listen for incoming messages from connection manager (Unified Stream)
+    _connectionManager.messageStream.listen((message) {
       _handleIncomingMessage(message);
     });
 
@@ -450,15 +445,54 @@ class FileTransferEngine {
     _taskUpdateController.add(updatedTask);
   }
 
+  String? _customSavePath;
+
+  void setCustomDownloadPath(String path) {
+    _customSavePath = path;
+    debugPrint('📂 [FileTransferEngine] Custom save path set to: $path');
+  }
+
   /// Get downloads directory
   Future<Directory> _getDownloadsDirectory() async {
+    // 1. Use Custom Path if set
+    if (_customSavePath != null) {
+      final dir = Directory(_customSavePath!);
+      if (await dir.exists()) return dir;
+      try {
+        await dir.create(recursive: true);
+        return dir;
+      } catch (e) {
+        debugPrint('⚠️ [FileTransferEngine] Failed to create custom dir: $e');
+      }
+    }
+
+    // 2. Default Fallback
+    Directory? dir;
     if (Platform.isAndroid) {
-      return Directory('/storage/emulated/0/Download');
+      dir = Directory('/storage/emulated/0/Download/FlashDrop');
     } else {
       // Windows
       final home = Platform.environment['USERPROFILE'] ?? '';
-      return Directory('$home\\Downloads');
+      dir = Directory('$home\\Downloads\\FlashDrop');
     }
+
+    if (!await dir.exists()) {
+      try {
+        await dir.create(recursive: true);
+      } catch (e) {
+        debugPrint(
+          '⚠️ [FileTransferEngine] Failed to create FlashDrop folder: $e',
+        );
+        // Fallback to root Downloads if creation fails
+        if (Platform.isAndroid) {
+          return Directory('/storage/emulated/0/Download');
+        } else {
+          final home = Platform.environment['USERPROFILE'] ?? '';
+          return Directory('$home\\Downloads');
+        }
+      }
+    }
+    return dir;
   }
 
   /// Get MIME type

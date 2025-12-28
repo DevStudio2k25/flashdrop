@@ -37,6 +37,17 @@ dependencies:
   device_info_plus: ^9.1.1
   path: ^1.9.1
 
+  # QR Code
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^5.2.3
+
+  # Window Manager (Windows desktop)
+  window_manager: ^0.3.8
+
+  # Bluetooth (Android only)
+  flutter_bluetooth_serial: ^0.4.0
+
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

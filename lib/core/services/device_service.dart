@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:network_info_plus/network_info_plus.dart';
 import 'package:uuid/uuid.dart';
 import '../models/device_info.dart';
 import '../constants/network_constants.dart';
@@ -16,12 +15,13 @@ class DeviceService {
 
   /// Get local device information
   Future<DeviceInfo> getLocalDeviceInfo() async {
+    // Always refresh IP on Android to handle network changes (Hotspot on/off)
+    if (Platform.isAndroid) _localDevice = null;
+
     if (_localDevice != null) return _localDevice!;
 
     try {
       final deviceInfoPlugin = DeviceInfoPlugin();
-      final networkInfo = NetworkInfo();
-
       String deviceName = 'Unknown Device';
       String platform = 'unknown';
 
@@ -35,20 +35,54 @@ class DeviceService {
         platform = 'windows';
       }
 
-      // Get local IP address
-      String? ipAddress = await networkInfo.getWifiIP();
-      ipAddress ??= await _getLocalIpAddress();
+      String? primaryIp;
+      String? secondaryIp;
 
-      if (ipAddress == null) {
-        throw Exception('Unable to get local IP address');
+      // START NEW IP SCAN LOGIC
+      try {
+        final interfaces = await NetworkInterface.list(
+          includeLoopback: false,
+          type: InternetAddressType.IPv4,
+        );
+
+        debugPrint(
+          '🔍 [DeviceService] Scanning Interfaces: ${interfaces.length} found',
+        );
+
+        for (final iface in interfaces) {
+          debugPrint('   👉 Interface: ${iface.name}');
+          for (final addr in iface.addresses) {
+            final ip = addr.address;
+            debugPrint('      🔹 IP: $ip');
+
+            if (ip.startsWith('192.168.')) {
+              debugPrint('      ✅ FOUND LAN IP: $ip');
+              primaryIp = ip; // Start of 192.168 is GOLD
+            } else if (ip.startsWith('10.')) {
+              secondaryIp ??= ip; // Keep as backup/info
+            } else if (primaryIp == null && secondaryIp == null) {
+              secondaryIp = ip; // Any other non-local
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('IP Scan Error: $e');
       }
+
+      // If we found a 192.168 address, USE IT.
+      // Otherwise, fallback to whatever else we found (so UI doesn't crash),
+      // but UI will likely warn "Hotspot not active".
+      String finalIp = primaryIp ?? secondaryIp ?? '127.0.0.1';
 
       _localDevice = DeviceInfo(
         id: const Uuid().v4(),
         name: deviceName,
-        ipAddress: ipAddress,
+        ipAddress: finalIp,
         platform: platform,
         port: NetworkConstants.defaultPort,
+        otherIp: secondaryIp != finalIp
+            ? secondaryIp
+            : null, // Store secondary if different
       );
 
       debugPrint('📱 [DeviceService] Local device: $_localDevice');
@@ -57,39 +91,6 @@ class DeviceService {
       debugPrint('❌ [DeviceService] Failed to get device info: $e');
       rethrow;
     }
-  }
-
-  /// Get local IP address (fallback method)
-  Future<String?> _getLocalIpAddress() async {
-    try {
-      final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-      );
-
-      for (var interface in interfaces) {
-        for (var addr in interface.addresses) {
-          // Skip loopback
-          if (addr.address.startsWith('127.')) continue;
-          // Prefer 192.168.x.x or 10.x.x.x
-          if (addr.address.startsWith('192.168.') ||
-              addr.address.startsWith('10.')) {
-            return addr.address;
-          }
-        }
-      }
-
-      // Return any non-loopback address
-      for (var interface in interfaces) {
-        for (var addr in interface.addresses) {
-          if (!addr.address.startsWith('127.')) {
-            return addr.address;
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('❌ [DeviceService] Error getting IP: $e');
-    }
-    return null;
   }
 
   /// Check if device is on same network as target IP

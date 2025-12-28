@@ -6,9 +6,17 @@ import '../../state/database_provider.dart';
 import '../theme/app_colors.dart';
 import '../widgets/status_badge.dart';
 import '../widgets/transfer_progress_card.dart';
+import '../widgets/qr_code_dialog.dart';
 import '../../core/services/connection_manager.dart' as conn_mgr;
 import '../../core/models/device_info.dart';
 import 'package:file_picker/file_picker.dart';
+import 'dart:io';
+import 'dart:async';
+import 'qr_scanner_screen.dart';
+import 'custom_file_picker.dart';
+import '../../core/services/pairing_service.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:convert';
 import 'dart:io';
 
 /// Main home screen
@@ -22,7 +30,6 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final TextEditingController _ipController = TextEditingController();
   int _selectedIndex = 0;
-  bool _isScanning = false;
 
   @override
   void initState() {
@@ -31,6 +38,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _initializeApp() async {
+    await _checkPermissions(); // Request Permissions First
+
     final connectionManager = ref.read(connectionManagerProvider);
     final transferEngine = ref.read(fileTransferEngineProvider);
     final database = ref.read(databaseServiceProvider);
@@ -40,12 +49,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     await database.initialize();
   }
 
+  Future<void> _checkPermissions() async {
+    if (Platform.isAndroid) {
+      // Basic Storage
+      await Permission.storage.request();
+      // For Android 11+
+      if (await Permission.manageExternalStorage.isDenied) {
+        await Permission.manageExternalStorage.request();
+      }
+
+      // For Android 13+ Photo Picker / Media (Instead of raw storage sometimes)
+      await Permission.photos.request();
+      await Permission.videos.request();
+      await Permission.audio.request();
+
+      // For Network/Discovery
+      await Permission.location.request();
+      await Permission.nearbyWifiDevices.request();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFFF3F4F6), // Light gray background
       appBar: AppBar(
-        title: const Text('FlashDrop'),
-        actions: [_buildConnectionStatus(), const SizedBox(width: 16)],
+        title: const Text(
+          'FlashDrop',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        elevation: 0,
+        backgroundColor: Colors.white,
+        foregroundColor: AppColors.textPrimary,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: IconButton(
+              icon: const Icon(Icons.folder_open, color: AppColors.textPrimary),
+              tooltip: 'Set Download Location',
+              onPressed: _pickDownloadFolder,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: _buildConnectionStatus(),
+          ),
+        ],
       ),
       body: IndexedStack(
         index: _selectedIndex,
@@ -62,13 +111,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             _selectedIndex = index;
           });
         },
+        backgroundColor: Colors.white,
+        elevation: 2,
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.wifi), label: 'Connect'),
           NavigationDestination(
-            icon: Icon(Icons.swap_horiz),
+            icon: Icon(Icons.wifi_outlined),
+            selectedIcon: Icon(Icons.wifi),
+            label: 'Connect',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.swap_horiz_outlined),
+            selectedIcon: Icon(Icons.swap_horiz),
             label: 'Transfers',
           ),
-          NavigationDestination(icon: Icon(Icons.history), label: 'History'),
+          NavigationDestination(
+            icon: Icon(Icons.history_outlined),
+            selectedIcon: Icon(Icons.history),
+            label: 'History',
+          ),
         ],
       ),
     );
@@ -84,601 +144,548 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             return const StatusBadge(
               text: 'Connected',
               color: AppColors.success,
+              icon: Icons.check_circle,
             );
           case conn_mgr.ConnectionState.connecting:
             return const StatusBadge(
-              text: 'Connecting...',
+              text: 'Connecting',
               color: AppColors.warning,
+              icon: Icons.sync,
             );
           case conn_mgr.ConnectionState.error:
-            return const StatusBadge(text: 'Error', color: AppColors.error);
+            return const StatusBadge(
+              text: 'Error',
+              color: AppColors.error,
+              icon: Icons.error,
+            );
           default:
             return const StatusBadge(
               text: 'Disconnected',
               color: AppColors.textTertiary,
+              icon: Icons.wifi_off,
             );
         }
       },
       loading: () =>
-          const StatusBadge(text: 'Loading...', color: AppColors.textTertiary),
+          const StatusBadge(text: '...', color: AppColors.textTertiary),
       error: (_, __) =>
           const StatusBadge(text: 'Error', color: AppColors.error),
     );
   }
 
+  Future<void> _pickDownloadFolder() async {
+    String? path = await FilePicker.platform.getDirectoryPath();
+    if (path != null) {
+      ref.read(fileTransferEngineProvider).setCustomDownloadPath(path);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Download location set to: $path'),
+            backgroundColor: AppColors.success,
+          ),
+        );
+      }
+    }
+  }
+
   Widget _buildConnectionTab() {
     final localDevice = ref.watch(localDeviceProvider);
     final remoteDevice = ref.watch(remoteDeviceProvider);
-    final connectionState = ref.watch(connectionStateProvider);
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Local device info
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Your Device',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+          // 1. My Device Card (Always visible)
+          _buildDeviceCard(localDevice),
+          const SizedBox(height: 24),
+
+          // 2. Server Control (Always visible to allow hosting)
+          _buildServerCard(),
+          const SizedBox(height: 24),
+
+          // 3. Client Control (Always visible to allow connecting)
+          _buildClientCard(),
+
+          const SizedBox(height: 24),
+
+          // 3. Connected Device Info (if any)
+          if (remoteDevice.value != null) ...[
+            _buildConnectedDeviceCard(remoteDevice.value!),
+            const SizedBox(height: 24),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeviceCard(AsyncValue<DeviceInfo?> localDevice) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+        side: BorderSide(color: AppColors.border.withOpacity(0.5)),
+      ),
+      color: Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  const SizedBox(height: 12),
-                  localDevice.when(
-                    data: (device) {
-                      if (device == null) {
-                        return const Text('No device info');
-                      }
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                  child: const Icon(
+                    Icons.smartphone,
+                    color: AppColors.primary,
+                    size: 32,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          _buildInfoRow('Name', device.name),
-                          _buildInfoRow('IP Address', device.ipAddress),
-                          _buildInfoRow(
-                            'Platform',
-                            device.platform.toUpperCase(),
+                          const Text(
+                            'This Device',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: AppColors.textSecondary,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
-                          _buildInfoRow('Port', device.port.toString()),
+                          // Refresh Button
+                          IconButton(
+                            icon: const Icon(
+                              Icons.refresh,
+                              size: 20,
+                              color: AppColors.primary,
+                            ),
+                            onPressed: () {
+                              ref.read(deviceServiceProvider).clearCache();
+                              // ignore: unused_result
+                              ref.refresh(localDeviceProvider);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Refreshing network info...'),
+                                ),
+                              );
+                            },
+                            tooltip: 'Refresh IP',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      localDevice.when(
+                        data: (device) => Text(
+                          device?.name ?? 'Unknown Device',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                        loading: () => const Text('Loading...'),
+                        error: (_, __) => const Text('Error loading info'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF9FAFB),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.border.withOpacity(0.5)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Builder(
+                    builder: (context) {
+                      final ip = localDevice.value?.ipAddress ?? '-';
+                      // Just show whatever IP we have. If it's 10.x, so be it.
+                      // We remove the strict visual error.
+                      return Row(
+                        children: [
+                          const Icon(
+                            Icons.wifi,
+                            size: 16,
+                            color: AppColors.primary,
+                          ),
+                          const SizedBox(width: 8),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Network IP',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: AppColors.textTertiary,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              Text(
+                                ip,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.textPrimary,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ],
+                          ),
                         ],
                       );
                     },
-                    loading: () => const CircularProgressIndicator(),
-                    error: (error, _) => Text('Error: $error'),
+                  ),
+                  Container(width: 1, height: 24, color: AppColors.border),
+                  _buildMiniInfo(
+                    'Port',
+                    localDevice.value?.port.toString() ?? '-',
+                    Icons.numbers,
                   ),
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 24),
+          ],
+        ),
+      ),
+    );
+  }
 
-          // Connection controls
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
+  Widget _buildMiniInfo(String label, String value, IconData icon) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: AppColors.textTertiary),
+        const SizedBox(width: 8),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 10,
+                color: AppColors.textTertiary,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+              ),
+            ),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textPrimary,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildServerCard() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final connectionState = ref.watch(connectionStateProvider);
+        return connectionState.when(
+          data: (state) {
+            final isRunning =
+                state == conn_mgr.ConnectionState.connected ||
+                state == conn_mgr.ConnectionState.listening;
+
+            return Card(
+              elevation: 4,
+              shadowColor: AppColors.primary.withOpacity(0.15),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'Host Session (Server)',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (isRunning)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.success.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: const Text(
+                              'Running',
+                              style: TextStyle(
+                                color: AppColors.success,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Start server to let others connect to you.',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    if (!isRunning)
+                      _buildPrimaryButton(
+                        label: 'Start Server',
+                        icon: Icons.wifi_tethering,
+                        onPressed: _startServer,
+                        color: AppColors.primary,
+                      )
+                    else ...[
+                      _buildPrimaryButton(
+                        label: 'Show QR Code (My IP)',
+                        icon: Icons.qr_code,
+                        onPressed:
+                            _showPCQR, // Reuse this method (renamed ideally but logic fits)
+                        color: AppColors.primary,
+                      ),
+                      const SizedBox(height: 12),
+                      _buildSecondaryButton(
+                        label: 'Stop Server',
+                        icon: Icons.stop_circle_outlined,
+                        onPressed: _disconnect,
+                        color: AppColors.error,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (_, __) => const SizedBox.shrink(),
+        );
+      },
+    );
+  }
+
+  Widget _buildClientCard() {
+    final connectionState = ref.watch(connectionStateProvider).value;
+    if (connectionState == conn_mgr.ConnectionState.connected) {
+      return const SizedBox.shrink();
+    }
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+        side: BorderSide(color: AppColors.border.withOpacity(0.5)),
+      ),
+      color: Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Join Session (Client)',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Connect to a device by IP or QR.',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 14),
+            ),
+            const SizedBox(height: 24),
+
+            TextField(
+              controller: _ipController,
+              decoration: InputDecoration(
+                hintText: 'Enter Server IP (e.g. 192.168.x.x)',
+                filled: true,
+                fillColor: const Color(0xFFF9FAFB),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                prefixIcon: const Icon(
+                  Icons.dialpad,
+                  color: AppColors.textTertiary,
+                ),
+              ),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 16),
+
+            Row(
+              children: [
+                Expanded(
+                  child: _buildPrimaryButton(
+                    label: 'Connect',
+                    icon: Icons.link,
+                    onPressed: _connectToServerManually,
+                    color: AppColors.primary,
+                  ),
+                ),
+                if (Platform.isAndroid || Platform.isIOS) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildSecondaryButton(
+                      label: 'Scan QR',
+                      icon: Icons.qr_code_scanner,
+                      onPressed: _scanQRCode,
+                      color: AppColors.secondary, // Green for scan
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ignore: unused_element
+
+  Widget _buildConnectedDeviceCard(DeviceInfo device) {
+    return Card(
+      color: AppColors.success,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.link, color: Colors.white, size: 24),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Connection',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                    'Connected To',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
-                  const SizedBox(height: 16),
-
-                  // Server OR Client mode (both Android and Windows)
-                  if (Platform.isAndroid || Platform.isWindows) ...[
-                    // Server status indicator
-                    Consumer(
-                      builder: (context, ref, child) {
-                        final connectionState = ref.watch(
-                          connectionStateProvider,
-                        );
-                        return connectionState.when(
-                          data: (state) {
-                            if (state == conn_mgr.ConnectionState.connected) {
-                              return Container(
-                                padding: const EdgeInsets.all(12),
-                                margin: const EdgeInsets.only(bottom: 12),
-                                decoration: BoxDecoration(
-                                  color: AppColors.success.withOpacity(0.1),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: AppColors.success,
-                                    width: 2,
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.check_circle,
-                                      color: AppColors.success,
-                                      size: 24,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          const Text(
-                                            '✅ Server Running',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 16,
-                                              color: AppColors.success,
-                                            ),
-                                          ),
-                                          Consumer(
-                                            builder: (context, ref, child) {
-                                              final localDevice = ref.watch(
-                                                localDeviceProvider,
-                                              );
-                                              return localDevice.when(
-                                                data: (device) => Text(
-                                                  'IP: ${device?.ipAddress ?? "Unknown"}',
-                                                  style: const TextStyle(
-                                                    fontSize: 14,
-                                                    color:
-                                                        AppColors.textSecondary,
-                                                  ),
-                                                ),
-                                                loading: () =>
-                                                    const Text('Loading...'),
-                                                error: (_, __) =>
-                                                    const SizedBox.shrink(),
-                                              );
-                                            },
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            }
-                            return const SizedBox.shrink();
-                          },
-                          loading: () => const SizedBox.shrink(),
-                          error: (_, __) => const SizedBox.shrink(),
-                        );
-                      },
+                  Text(
+                    device.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
                     ),
-
-                    // Server button (always visible, changes based on state)
-                    Consumer(
-                      builder: (context, ref, child) {
-                        final connectionState = ref.watch(
-                          connectionStateProvider,
-                        );
-                        return connectionState.when(
-                          data: (state) {
-                            final isRunning =
-                                state == conn_mgr.ConnectionState.connected;
-
-                            return Column(
-                              children: [
-                                ElevatedButton.icon(
-                                  onPressed: isRunning
-                                      ? _disconnect
-                                      : _startServer,
-                                  icon: Icon(
-                                    isRunning
-                                        ? Icons.stop
-                                        : Icons.wifi_tethering,
-                                  ),
-                                  label: Text(
-                                    isRunning
-                                        ? 'Stop Server'
-                                        : 'Start as Server (Hotspot Mode)',
-                                  ),
-                                  style: ElevatedButton.styleFrom(
-                                    minimumSize: const Size(
-                                      double.infinity,
-                                      50,
-                                    ),
-                                    backgroundColor: isRunning
-                                        ? AppColors.error
-                                        : null,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  isRunning
-                                      ? '🟢 Server is running'
-                                      : '📱 Enable hotspot, then start server',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: isRunning
-                                        ? AppColors.success
-                                        : AppColors.textSecondary,
-                                    fontWeight: isRunning
-                                        ? FontWeight.w600
-                                        : FontWeight.normal,
-                                  ),
-                                ),
-                                const SizedBox(height: 16),
-                                // Divider (only if not running)
-                                if (!isRunning) ...[
-                                  const Row(
-                                    children: [
-                                      Expanded(child: Divider()),
-                                      Padding(
-                                        padding: EdgeInsets.symmetric(
-                                          horizontal: 16,
-                                        ),
-                                        child: Text(
-                                          'OR',
-                                          style: TextStyle(
-                                            color: AppColors.textSecondary,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ),
-                                      Expanded(child: Divider()),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 16),
-                                ],
-                              ],
-                            );
-                          },
-                          loading: () => ElevatedButton.icon(
-                            onPressed: _startServer,
-                            icon: const Icon(Icons.wifi_tethering),
-                            label: const Text('Start as Server (Hotspot Mode)'),
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: const Size(double.infinity, 50),
-                            ),
-                          ),
-                          error: (_, __) => ElevatedButton.icon(
-                            onPressed: _startServer,
-                            icon: const Icon(Icons.wifi_tethering),
-                            label: const Text('Start as Server (Hotspot Mode)'),
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: const Size(double.infinity, 50),
-                            ),
-                          ),
-                        );
-                      },
+                  ),
+                  Text(
+                    device.ipAddress,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                      fontFamily: 'monospace',
                     ),
-
-                    // Client mode (scan for other Android servers)
-                    const Text(
-                      '🔍 Connect to Another Device:',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-
-                  // Scan button (for both Android and Windows)
-                  if (Platform.isAndroid || Platform.isWindows) ...[
-                    ElevatedButton.icon(
-                      onPressed: _startDiscovery,
-                      icon: _isScanning
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.search),
-                      label: Text(
-                        _isScanning
-                            ? 'Scanning...'
-                            : '🔍 Auto Scan for Devices',
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        minimumSize: const Size(double.infinity, 50),
-                      ),
-                    ),
-
-                    // Show scanning message
-                    if (_isScanning)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text(
-                          'Looking for nearby devices...',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.textSecondary,
-                            fontStyle: FontStyle.italic,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-
-                    // Show discovered IPs
-                    Consumer(
-                      builder: (context, ref, child) {
-                        final discoveredIPs = ref.watch(discoveredIPsProvider);
-
-                        return discoveredIPs.when(
-                          data: (ips) {
-                            if (ips.isEmpty) {
-                              return const SizedBox.shrink();
-                            }
-
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const SizedBox(height: 16),
-                                Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.devices,
-                                      color: AppColors.primary,
-                                      size: 20,
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      'Found ${ips.length} device(s):',
-                                      style: const TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 8),
-                                ...ips.map(
-                                  (ip) => Card(
-                                    margin: const EdgeInsets.only(bottom: 8),
-                                    child: ListTile(
-                                      leading: const Icon(
-                                        Icons.phone_android,
-                                        color: AppColors.primary,
-                                      ),
-                                      title: Text(
-                                        ip,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      subtitle: const Text('FlashDrop Server'),
-                                      trailing: ElevatedButton(
-                                        onPressed: () => _connectToIP(ip),
-                                        child: const Text('Connect'),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                          loading: () =>
-                              const SizedBox.shrink(), // Don't show loading by default
-                          error: (_, __) => const SizedBox.shrink(),
-                        );
-                      },
-                    ),
-
-                    // Divider
-                    const SizedBox(height: 16),
-                    const Row(
-                      children: [
-                        Expanded(child: Divider()),
-                        Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 16),
-                          child: Text(
-                            'OR',
-                            style: TextStyle(
-                              color: AppColors.textSecondary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        Expanded(child: Divider()),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Manual IP Entry
-                    const Text(
-                      '📝 Manual Connection:',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-
-                    // Show Android IP if available
-                    Consumer(
-                      builder: (context, ref, child) {
-                        final localDevice = ref.watch(localDeviceProvider);
-                        return localDevice.when(
-                          data: (device) {
-                            if (device != null && Platform.isAndroid) {
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: Container(
-                                  padding: const EdgeInsets.all(12),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.primary.withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                      color: AppColors.primary.withOpacity(0.3),
-                                    ),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.info_outline,
-                                        color: AppColors.primary,
-                                        size: 20,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            const Text(
-                                              'Your Android IP:',
-                                              style: TextStyle(
-                                                fontSize: 12,
-                                                color: AppColors.textSecondary,
-                                              ),
-                                            ),
-                                            Text(
-                                              device.ipAddress,
-                                              style: const TextStyle(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w600,
-                                                color: AppColors.primary,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(Icons.copy),
-                                        onPressed: () {
-                                          // Copy to clipboard
-                                          _ipController.text = device.ipAddress;
-                                          ScaffoldMessenger.of(
-                                            context,
-                                          ).showSnackBar(
-                                            const SnackBar(
-                                              content: Text(
-                                                'IP copied to field!',
-                                              ),
-                                              duration: Duration(seconds: 1),
-                                            ),
-                                          );
-                                        },
-                                        tooltip: 'Copy to field',
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            }
-                            return const SizedBox.shrink();
-                          },
-                          loading: () => const SizedBox.shrink(),
-                          error: (_, __) => const SizedBox.shrink(),
-                        );
-                      },
-                    ),
-
-                    TextField(
-                      controller: _ipController,
-                      decoration: const InputDecoration(
-                        labelText: 'Server IP Address',
-                        hintText: '192.168.43.1',
-                        prefixIcon: Icon(Icons.computer),
-                        helperText:
-                            'Enter Android hotspot IP (shown above if Android)',
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    const SizedBox(height: 12),
-                    ElevatedButton.icon(
-                      onPressed: _connectToServerManually,
-                      icon: const Icon(Icons.link),
-                      label: const Text('Connect Manually'),
-                      style: ElevatedButton.styleFrom(
-                        minimumSize: const Size(double.infinity, 50),
-                        backgroundColor: AppColors.secondary,
-                      ),
-                    ),
-                  ],
-
-                  const SizedBox(height: 16),
-
-                  // Disconnect button
-                  ...connectionState.when(
-                    data: (state) {
-                      if (state == conn_mgr.ConnectionState.connected) {
-                        return [
-                          OutlinedButton.icon(
-                            onPressed: _disconnect,
-                            icon: const Icon(Icons.link_off),
-                            label: const Text('Disconnect'),
-                            style: OutlinedButton.styleFrom(
-                              minimumSize: const Size(double.infinity, 50),
-                              foregroundColor: AppColors.error,
-                            ),
-                          ),
-                        ];
-                      }
-                      return <Widget>[];
-                    },
-                    loading: () => <Widget>[],
-                    error: (_, __) => <Widget>[],
                   ),
                 ],
               ),
             ),
-          ),
+            IconButton(
+              onPressed: _disconnect,
+              icon: const Icon(Icons.close, color: Colors.white),
+              tooltip: 'Disconnect',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-          // Remote device info
-          remoteDevice.when(
-            data: (device) {
-              if (device == null) return const SizedBox.shrink();
-              return Column(
-                children: [
-                  const SizedBox(height: 24),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Connected Device',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          _buildInfoRow('Name', device.name),
-                          _buildInfoRow('IP Address', device.ipAddress),
-                          _buildInfoRow(
-                            'Platform',
-                            device.platform.toUpperCase(),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              );
-            },
-            loading: () => const SizedBox.shrink(),
-            error: (_, __) => const SizedBox.shrink(),
+  Widget _buildPrimaryButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onPressed,
+    required Color color,
+  }) {
+    return ElevatedButton(
+      onPressed: onPressed,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: color,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        minimumSize: const Size(double.infinity, 56),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 22),
+          const SizedBox(width: 12),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildInfoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+  Widget _buildSecondaryButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onPressed,
+    required Color color,
+  }) {
+    return OutlinedButton(
+      onPressed: onPressed,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: color,
+        side: BorderSide(color: color.withOpacity(0.3), width: 1.5),
+        minimumSize: const Size(double.infinity, 56),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          Icon(icon, size: 22),
+          const SizedBox(width: 12),
           Text(
             label,
-            style: const TextStyle(
-              color: AppColors.textSecondary,
-              fontSize: 14,
-            ),
-          ),
-          Text(
-            value,
-            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           ),
         ],
       ),
@@ -691,16 +698,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return connectionState.when(
       data: (state) {
         if (state != conn_mgr.ConnectionState.connected) {
-          return const Center(
+          return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.link_off, size: 64, color: AppColors.textTertiary),
-                SizedBox(height: 16),
-                Text(
-                  'Not connected to any device',
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: AppColors.textTertiary.withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.link_off_rounded,
+                    size: 48,
+                    color: AppColors.textTertiary,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'No Connection',
                   style: TextStyle(
-                    fontSize: 16,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Connect to a device to start sharing files.',
+                  style: TextStyle(
+                    fontSize: 14,
                     color: AppColors.textSecondary,
                   ),
                 ),
@@ -709,33 +736,54 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         }
 
-        return Column(
+        return Stack(
           children: [
-            // Send file button
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: ElevatedButton.icon(
-                onPressed: _pickAndSendFile,
-                icon: const Icon(Icons.upload_file),
-                label: const Text('Select Files to Send'),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 50),
+            Column(
+              children: [
+                // Transfers list
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(
+                      16,
+                      24,
+                      16,
+                      100,
+                    ), // Bottom padding for FAB
+                    children: [
+                      // Sending section
+                      _buildSendingSection(),
+                      const SizedBox(height: 24),
+
+                      // Receiving section
+                      _buildReceivingSection(),
+                    ],
+                  ),
                 ),
-              ),
+              ],
             ),
 
-            // Transfers list
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                children: [
-                  // Sending section
-                  _buildSendingSection(),
-                  const SizedBox(height: 24),
-
-                  // Receiving section
-                  _buildReceivingSection(),
-                ],
+            // Floating File Picker Button
+            Positioned(
+              bottom: 24,
+              right: 24,
+              left: 24,
+              child: ElevatedButton.icon(
+                onPressed: _pickAndSendFile,
+                icon: const Icon(Icons.add_rounded, size: 28),
+                label: const Text(
+                  'Send Files',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                  elevation: 8,
+                  shadowColor: AppColors.primary.withOpacity(0.4),
+                  minimumSize: const Size(double.infinity, 64),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                ),
               ),
             ),
           ],
@@ -758,20 +806,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                const Icon(Icons.upload, color: AppColors.primary),
-                const SizedBox(width: 8),
-                Text(
-                  'SENDING (${tasks.length})',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
+            Padding(
+              padding: const EdgeInsets.only(left: 8, bottom: 12),
+              child: Text(
+                'SENDING (${tasks.length})',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.textTertiary,
+                  letterSpacing: 1.5,
                 ),
-              ],
+              ),
             ),
-            const SizedBox(height: 12),
             ...tasks.map(
               (task) => Padding(
                 padding: const EdgeInsets.only(bottom: 12),
@@ -798,20 +844,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                const Icon(Icons.download, color: AppColors.secondary),
-                const SizedBox(width: 8),
-                Text(
-                  'RECEIVING (${tasks.length})',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
+            Padding(
+              padding: const EdgeInsets.only(left: 8, bottom: 12),
+              child: Text(
+                'RECEIVING (${tasks.length})',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.textTertiary,
+                  letterSpacing: 1.5,
                 ),
-              ],
+              ),
             ),
-            const SizedBox(height: 12),
             ...tasks.map(
               (task) => Padding(
                 padding: const EdgeInsets.only(bottom: 12),
@@ -865,11 +909,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Future<void> _startServer() async {
     try {
       final connectionManager = ref.read(connectionManagerProvider);
+
+      // REFRESH DEVICE INFO NOW (to get latest IP)
+      final deviceService = ref.read(deviceServiceProvider);
+      deviceService.clearCache();
+      await deviceService.getLocalDeviceInfo();
+
       await connectionManager.startServer();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Server started successfully')),
+          const SnackBar(
+            content: Text('Server started. Waiting for connection...'),
+          ),
         );
       }
     } catch (e) {
@@ -877,96 +929,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Failed to start server: $e')));
-      }
-    }
-  }
-
-  Future<void> _startDiscovery() async {
-    try {
-      setState(() {
-        _isScanning = true;
-      });
-
-      debugPrint('🔍 [UI] Starting discovery...');
-      final connectionManager = ref.read(connectionManagerProvider);
-      await connectionManager.startDiscovery();
-
-      debugPrint('✅ [UI] Discovery started successfully');
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Scanning... Devices will appear below'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
-
-      // Auto-stop scanning after 30 seconds
-      Future.delayed(const Duration(seconds: 30), () {
-        if (mounted) {
-          setState(() {
-            _isScanning = false;
-          });
-        }
-      });
-    } catch (e) {
-      setState(() {
-        _isScanning = false;
-      });
-
-      debugPrint('❌ [UI] Discovery failed: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Discovery failed: $e\n\nCheck Windows Firewall!'),
-            duration: Duration(seconds: 5),
-            backgroundColor: AppColors.error,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _connectToDevice(DeviceInfo device) async {
-    try {
-      final connectionManager = ref.read(connectionManagerProvider);
-      await connectionManager.connectToServer(device.ipAddress);
-
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Connected to ${device.name}')));
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Connection failed: $e')));
-      }
-    }
-  }
-
-  Future<void> _connectToIP(String ip) async {
-    try {
-      debugPrint('🔗 [UI] Connecting to $ip...');
-      final connectionManager = ref.read(connectionManagerProvider);
-      await connectionManager.connectToServer(ip);
-
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Connected to $ip!')));
-      }
-    } catch (e) {
-      debugPrint('❌ [UI] Connection failed: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connection failed: $e'),
-            backgroundColor: AppColors.error,
-          ),
-        );
       }
     }
   }
@@ -1003,6 +965,75 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  Future<void> _scanQRCode() async {
+    // 1. Scan QR
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (context) => const QRScannerScreen()),
+    );
+
+    if (result != null && mounted) {
+      debugPrint("📷 QR Result: $result");
+
+      try {
+        String? targetIp;
+
+        // Try parsing JSON first (New Style)
+        try {
+          final Map<String, dynamic> data = jsonDecode(result);
+          if (data.containsKey('ips')) {
+            final ips = List<String>.from(data['ips']);
+            // Pick first 192.168 if available, else first one
+            targetIp = ips.firstWhere(
+              (ip) => ip.startsWith('192.168'),
+              orElse: () => ips.first,
+            );
+          } else if (data.containsKey('ip')) {
+            targetIp = data['ip'];
+          }
+        } catch (_) {
+          // Not JSON, assume raw IP string (Old Style)
+          targetIp = result.trim();
+        }
+
+        if (targetIp != null) {
+          setState(() {
+            _ipController.text = targetIp!; // JUST FILL
+          });
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('IP Scanned: $targetIp')));
+        } else {
+          throw Exception("No IP found in QR");
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('Invalid QR Data')));
+        }
+      }
+    }
+  }
+
+  Future<void> _showPCQR() async {
+    // Just show a QR with local IPs. No server/handshake logic.
+    final pairingService = ref.read(pairingServiceProvider);
+    final ips = await pairingService.getPCCandidateIPs();
+    final qrPayload = jsonEncode({"ips": ips});
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (context) => QRCodeDialog(
+        deviceName: 'This Device IPs',
+        ipAddress: ips.join('\n'), // Show all IPs visibily
+        qrData: qrPayload,
+      ),
+    );
+  }
+
   Future<void> _disconnect() async {
     final connectionManager = ref.read(connectionManagerProvider);
     await connectionManager.disconnect();
@@ -1015,38 +1046,48 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _pickAndSendFile() async {
-    try {
-      // Allow multiple file selection
-      final result = await FilePicker.platform.pickFiles(allowMultiple: true);
-      if (result == null || result.files.isEmpty) return;
+    List<File> files = [];
 
-      // Convert to File objects
-      final files = result.files
-          .where((f) => f.path != null)
-          .map((f) => File(f.path!))
-          .toList();
-
-      if (files.isEmpty) return;
-
-      final transferEngine = ref.read(fileTransferEngineProvider);
-
-      // Add files to queue
-      await transferEngine.addFilesToQueue(files);
-
-      // Start sending queue
-      await transferEngine.startSendingQueue();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${files.length} file(s) added to queue')),
-        );
+    if (Platform.isAndroid) {
+      // Use Custom Picker to avoid 'unknown_path' crashes
+      final paths = await Navigator.push<List<String>>(
+        context,
+        MaterialPageRoute(builder: (_) => const CustomFilePicker()),
+      );
+      if (paths == null || paths.isEmpty) return;
+      files = paths.map((p) => File(p)).toList();
+    } else {
+      // Logic for Windows/Desktop
+      try {
+        final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+        if (result == null || result.files.isEmpty) return;
+        files = result.files
+            .where((f) => f.path != null)
+            .map((f) => File(f.path!))
+            .toList();
+      } catch (e) {
+        debugPrint("Windows FilePicker Error: $e");
+        return;
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Failed to send files: $e')));
-      }
+    }
+
+    if (files.isEmpty) return;
+
+    final transferEngine = ref.read(fileTransferEngineProvider);
+
+    // Add files to queue
+    await transferEngine.addFilesToQueue(files);
+
+    // Start sending queue
+    await transferEngine.startSendingQueue();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${files.length} file(s) added to queue'),
+          backgroundColor: AppColors.success,
+        ),
+      );
     }
   }
 

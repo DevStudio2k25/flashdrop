@@ -16,8 +16,23 @@ subprojects {
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
 subprojects {
-    project.evaluationDependsOn(":app")
+    afterEvaluate {
+        try {
+            val android = extensions.findByName("android")
+            if (android != null) {
+                val getNamespace = android.javaClass.getMethod("getNamespace")
+                val setNamespace = android.javaClass.getMethod("setNamespace", String::class.java)
+
+                if (getNamespace.invoke(android) == null) {
+                    setNamespace.invoke(android, project.group.toString())
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore reflection errors or if methods don't exist
+        }
+    }
 }
+
 
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)

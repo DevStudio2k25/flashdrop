@@ -3,16 +3,17 @@ class NetworkConstants {
   NetworkConstants._();
 
   /// Default server port
-  static const int defaultPort = 8888;
+  static const int defaultPort = 4040;
 
-  /// Discovery broadcast port (UDP)
-  static const int discoveryPort = 8889;
+  /// Discovery broadcast port (UDP) - Used for Finding Devices automatically
+  static const int discoveryPort = 4041;
 
   /// Chunk size for file transfer (128KB - optimized for speed)
   static const int chunkSize = 128 * 1024;
 
   /// Socket timeout
-  static const Duration socketTimeout = Duration(seconds: 30);
+  /// Socket timeout
+  static const Duration socketTimeout = Duration(seconds: 5);
 
   /// Discovery broadcast interval
   static const Duration discoveryInterval = Duration(seconds: 2);

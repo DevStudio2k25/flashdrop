@@ -44,11 +44,7 @@ class TcpServer {
     }
 
     try {
-      _serverSocket = await ServerSocket.bind(
-        InternetAddress.anyIPv4,
-        port,
-        shared: true,
-      );
+      _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, port);
 
       _isRunning = true;
       debugPrint(
