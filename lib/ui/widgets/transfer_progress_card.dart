@@ -108,11 +108,17 @@ class TransferProgressCard extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        '${(task.progress * 100).toStringAsFixed(0)}%',
-                        style: const TextStyle(
+                        task.status == TransferStatus.verifying
+                            ? (task.direction == TransferDirection.send
+                                  ? 'Waiting for Ack...'
+                                  : 'Verifying...')
+                            : '${(task.progress * 100).toStringAsFixed(0)}%',
+                        style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
-                          color: AppColors.textPrimary,
+                          color: task.status == TransferStatus.verifying
+                              ? AppColors.primary
+                              : AppColors.textPrimary,
                         ),
                       ),
                     ],
@@ -182,6 +188,15 @@ class TransferProgressCard extends StatelessWidget {
           Icons.error_rounded,
           color: AppColors.error,
           size: 28,
+        );
+      case TransferStatus.verifying:
+        return const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation(AppColors.primary),
+          ),
         );
       case TransferStatus.inProgress:
         // No icon here, progress shown below

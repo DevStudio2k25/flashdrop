@@ -4,6 +4,7 @@ import 'package:window_manager/window_manager.dart';
 import 'dart:io';
 import 'ui/theme/app_theme.dart';
 import 'ui/screens/home_screen.dart';
+import 'ui/widgets/desktop_frame.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,17 +14,18 @@ void main() async {
     await windowManager.ensureInitialized();
 
     const windowOptions = WindowOptions(
-      size: Size(900, 700),
-      minimumSize: Size(900, 700),
-      maximumSize: Size(900, 700),
+      size: const Size(420, 680),
+      minimumSize: const Size(420, 680),
+      maximumSize: const Size(420, 680),
       center: true,
       backgroundColor: Colors.transparent,
       skipTaskbar: false,
-      titleBarStyle: TitleBarStyle.normal,
-      title: 'FlashDrop - Fast File Transfer',
+      titleBarStyle: TitleBarStyle.hidden,
+      title: 'FlashDrop',
     );
 
     await windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.setResizable(false);
       await windowManager.show();
       await windowManager.focus();
     });
@@ -41,7 +43,9 @@ class FlashDropApp extends StatelessWidget {
       title: 'FlashDrop',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: const HomeScreen(),
+      home: Platform.isWindows
+          ? const DesktopFrame(child: HomeScreen())
+          : const HomeScreen(),
     );
   }
 }

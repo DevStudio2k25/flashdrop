@@ -11,6 +11,7 @@ enum TransferStatus {
   completed,
   failed,
   cancelled,
+  verifying, // Waiting for ACK or Disk Check
 }
 
 /// Transfer task model
@@ -47,7 +48,9 @@ class TransferTask {
 
   /// Check if transfer is active
   bool get isActive =>
-      status == TransferStatus.inProgress || status == TransferStatus.pending;
+      status == TransferStatus.inProgress ||
+      status == TransferStatus.pending ||
+      status == TransferStatus.verifying;
 
   /// Check if transfer is complete
   bool get isComplete => status == TransferStatus.completed;

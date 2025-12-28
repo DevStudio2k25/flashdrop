@@ -238,6 +238,10 @@ class FileTransferEngine {
         '📤 [FileTransferEngine] All bytes sent. Waiting for receiver confirmation...',
       );
 
+      // Met golden rule: Bytes sent != Complete.
+      // Transition to VERIFYING state (UI shows "Waiting for confirmation...")
+      _updateTaskStatus(taskId, TransferStatus.verifying);
+
       // We do NOT mark complete here. We wait for ACK.
     } catch (e) {
       await randomAccessFile.close();
@@ -288,7 +292,12 @@ class FileTransferEngine {
 
         // Progress Update
         final bytesReceived = _receivedBytes[taskId]!;
-        final speed = 0.0;
+
+        // Calculate Speed (Average from start)
+        final elapsed = DateTime.now()
+            .difference(task.startTime)
+            .inMilliseconds;
+        final speed = elapsed > 0 ? (bytesReceived / elapsed) * 1000.0 : 0.0;
 
         final now = DateTime.now();
         final lastUpdate = _lastProgressUpdate[taskId];
@@ -298,8 +307,18 @@ class FileTransferEngine {
           _lastProgressUpdate[taskId] = now;
         }
 
+        // STRICT BYTE CHECK: Only mark complete if bytes exactly match
+        // Overflow protection: If we get MORE than expected, something is wrong.
+        if (bytesReceived > task.fileMetadata.size) {
+          debugPrint(
+            '❌ [FileTransferEngine] ERROR: Received more bytes than expected!',
+          );
+          await _handleTransferFailure(taskId, 'Size Mismatch (Overflow)');
+          return;
+        }
+
         // Completion Check
-        if (bytesReceived >= task.fileMetadata.size) {
+        if (bytesReceived == task.fileMetadata.size) {
           await _completeFileReception(taskId);
           return; // Stop processing this task
         }
@@ -317,14 +336,50 @@ class FileTransferEngine {
 
   /// Complete file reception
   Future<void> _completeFileReception(String taskId) async {
-    debugPrint('🏁 [FileTransferEngine] Bytes Downloaded. Finalizing...');
+    debugPrint('🏁 [FileTransferEngine] Bytes Downloaded. Verifying...');
 
-    final file = _openFiles[taskId];
-    await file?.close();
+    // Update status to VERIFYING (UI shows "Verifying...")
+    _updateTaskStatus(taskId, TransferStatus.verifying);
+
+    final fileRef = _openFiles[taskId];
+    await fileRef?.close();
     _openFiles.remove(taskId);
     _writeQueues.remove(taskId);
 
     final task = _activeTasks[taskId];
+    if (task == null) return;
+
+    // 🔒 SAFETY CHECK: OPTION A - SIZE VERIFY
+    // Verify exact file size on disk matches metadata
+    final savedFile = File(task.savePath!);
+    if (!savedFile.existsSync()) {
+      _updateTaskStatus(
+        taskId,
+        TransferStatus.failed,
+        errorMessage: 'File missing after download',
+      );
+      return;
+    }
+
+    final savedSize = await savedFile.length();
+    final expectedSize = task.fileMetadata.size;
+
+    if (savedSize != expectedSize) {
+      debugPrint(
+        '❌ [FileTransferEngine] INTEGRITY CHECK FAILED: Expected $expectedSize, Got $savedSize',
+      );
+      _updateTaskStatus(
+        taskId,
+        TransferStatus.failed,
+        errorMessage: 'Integrity Check Failed (Size Mismatch)',
+      );
+      return;
+    }
+
+    debugPrint(
+      '🔐 [FileTransferEngine] Integrity Check Passed. Marking Complete.',
+    );
+
     if (task != null) {
       _updateTaskStatus(taskId, TransferStatus.completed);
       _fileReceivedController.add(task);
@@ -341,6 +396,15 @@ class FileTransferEngine {
         await _connectionManager.client!.sendMessage(ackMsg);
       }
     }
+  }
+
+  /// Handle failures helper
+  Future<void> _handleTransferFailure(String taskId, String error) async {
+    final file = _openFiles[taskId];
+    await file?.close();
+    _openFiles.remove(taskId);
+    _writeQueues.remove(taskId);
+    _updateTaskStatus(taskId, TransferStatus.failed, errorMessage: error);
   }
 
   /// Handle incoming messages
