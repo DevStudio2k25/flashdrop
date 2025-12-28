@@ -5,7 +5,9 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     
     <!-- Storage permissions for Android 12 and below -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
@@ -59,10 +61,11 @@
         
         <!-- Foreground Service for file transfers -->
         <service
-            android:name=".ForegroundService"
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
         
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

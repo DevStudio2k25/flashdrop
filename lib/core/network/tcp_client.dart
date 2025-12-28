@@ -48,32 +48,48 @@ class TcpClient {
       _isConnected = true;
       debugPrint('✅ [TcpClient] Connected to ${remoteDevice.name}');
 
+      // Configure socket for optimal performance
+      try {
+        _socket!.setOption(SocketOption.tcpNoDelay, true);
+      } catch (e) {
+        debugPrint('⚠️ [TcpClient] Could not set socket options: $e');
+      }
+
       _socket!.listen(
         (List<int> data) {
-          // Try to decode as JSON message first
-          try {
-            final String chunk = utf8.decode(data);
-            messageBuffer += chunk;
+          // Check if this looks like JSON (starts with '{' or contains newline)
+          if (data.isNotEmpty && (data[0] == 123 || data.contains(10))) {
+            // Likely JSON message
+            try {
+              final String chunk = utf8.decode(data);
+              messageBuffer += chunk;
 
-            // Process complete messages
-            while (messageBuffer.contains(NetworkConstants.messageDelimiter)) {
-              final delimiterIndex = messageBuffer.indexOf(
+              // Process complete messages
+              while (messageBuffer.contains(
                 NetworkConstants.messageDelimiter,
-              );
-              final message = messageBuffer.substring(0, delimiterIndex);
-              messageBuffer = messageBuffer.substring(delimiterIndex + 1);
+              )) {
+                final delimiterIndex = messageBuffer.indexOf(
+                  NetworkConstants.messageDelimiter,
+                );
+                final message = messageBuffer.substring(0, delimiterIndex);
+                messageBuffer = messageBuffer.substring(delimiterIndex + 1);
 
-              if (message.isNotEmpty) {
-                try {
-                  final json = jsonDecode(message) as Map<String, dynamic>;
-                  _messageController.add(json);
-                } catch (e) {
-                  debugPrint('⚠️ [TcpClient] Invalid JSON: $message');
+                if (message.isNotEmpty) {
+                  try {
+                    final json = jsonDecode(message) as Map<String, dynamic>;
+                    _messageController.add(json);
+                  } catch (e) {
+                    // Not JSON, treat as binary
+                    _dataController.add(utf8.encode(message));
+                  }
                 }
               }
+            } catch (e) {
+              // Failed to decode, treat as binary
+              _dataController.add(data);
             }
-          } catch (e) {
-            // Not a text message, treat as raw binary data
+          } else {
+            // Binary data
             _dataController.add(data);
           }
         },

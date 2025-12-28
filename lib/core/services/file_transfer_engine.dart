@@ -7,6 +7,8 @@ import '../models/file_metadata.dart';
 import '../models/transfer_task.dart';
 import '../constants/network_constants.dart';
 import '../services/connection_manager.dart';
+import 'transfer_foreground_service.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 /// Enhanced file transfer engine with queue and real progress
 class FileTransferEngine {
@@ -56,6 +58,11 @@ class FileTransferEngine {
   /// Initialize transfer engine
   Future<void> initialize() async {
     debugPrint('🔧 [FileTransferEngine] Initializing...');
+
+    // Initialize foreground service (Android only)
+    if (Platform.isAndroid) {
+      await TransferForegroundService.initialize();
+    }
 
     // Listen for incoming messages from connection manager (Unified Stream)
     _connectionManager.messageStream.listen((message) {
@@ -110,6 +117,18 @@ class FileTransferEngine {
     _isSending = true;
     debugPrint('🚀 [FileTransferEngine] Starting queue processing...');
 
+    // Start foreground service and wake lock (Android only)
+    if (Platform.isAndroid) {
+      await WakelockPlus.enable();
+      final firstTask = _activeTasks[_sendQueue.first];
+      if (firstTask != null) {
+        await TransferForegroundService.startService(
+          fileName: firstTask.fileMetadata.name,
+          totalFiles: _sendQueue.length,
+        );
+      }
+    }
+
     while (_sendQueue.isNotEmpty) {
       final taskId = _sendQueue.first;
       await _sendSingleFile(taskId);
@@ -117,7 +136,43 @@ class FileTransferEngine {
     }
 
     _isSending = false;
+    debugPrint(
+      '✅ [FileTransferEngine] All files sent, waiting for confirmations...',
+    );
+
+    // Wait for all tasks to be actually completed (ACK received)
+    final sentTasks = _activeTasks.values
+        .where((t) => t.direction == TransferDirection.send)
+        .toList();
+
+    if (sentTasks.isNotEmpty) {
+      // Wait max 30 seconds for all ACKs
+      final startWait = DateTime.now();
+      while (sentTasks.any((t) => t.status == TransferStatus.verifying)) {
+        await Future.delayed(const Duration(milliseconds: 100));
+
+        // Timeout after 30 seconds
+        if (DateTime.now().difference(startWait).inSeconds > 30) {
+          debugPrint(
+            '⚠️ [FileTransferEngine] ACK timeout, marking as complete',
+          );
+          for (final task in sentTasks) {
+            if (task.status == TransferStatus.verifying) {
+              _updateTaskStatus(task.id, TransferStatus.completed);
+            }
+          }
+          break;
+        }
+      }
+    }
+
     debugPrint('✅ [FileTransferEngine] Queue processing complete');
+
+    // Stop foreground service and wake lock (Android only)
+    if (Platform.isAndroid) {
+      await TransferForegroundService.stopService();
+      await WakelockPlus.disable();
+    }
   }
 
   /// Send single file
@@ -223,11 +278,12 @@ class FileTransferEngine {
         final elapsed = DateTime.now().difference(startTime).inMilliseconds;
         final speed = elapsed > 0 ? (bytesSent / elapsed) * 1000.0 : 0.0;
 
-        // Update progress (throttle to every 200ms)
+        // Update progress (throttle using constant)
         final now = DateTime.now();
         final lastUpdate = _lastProgressUpdate[taskId];
         if (lastUpdate == null ||
-            now.difference(lastUpdate).inMilliseconds > 200) {
+            now.difference(lastUpdate).inMilliseconds >
+                NetworkConstants.progressUpdateThrottle) {
           _updateTaskProgress(taskId, bytesSent, speed);
           _lastProgressUpdate[taskId] = now;
         }
@@ -302,7 +358,8 @@ class FileTransferEngine {
         final now = DateTime.now();
         final lastUpdate = _lastProgressUpdate[taskId];
         if (lastUpdate == null ||
-            now.difference(lastUpdate).inMilliseconds > 200) {
+            now.difference(lastUpdate).inMilliseconds >
+                NetworkConstants.progressUpdateThrottle) {
           _updateTaskProgress(taskId, bytesReceived, speed);
           _lastProgressUpdate[taskId] = now;
         }
@@ -380,21 +437,28 @@ class FileTransferEngine {
       '🔐 [FileTransferEngine] Integrity Check Passed. Marking Complete.',
     );
 
-    if (task != null) {
-      _updateTaskStatus(taskId, TransferStatus.completed);
-      _fileReceivedController.add(task);
-      debugPrint(
-        '✅ [FileTransferEngine] File written to disk: ${task.fileMetadata.name}',
-      );
+    _updateTaskStatus(taskId, TransferStatus.completed);
+    _fileReceivedController.add(task);
+    debugPrint(
+      '✅ [FileTransferEngine] File written to disk: ${task.fileMetadata.name}',
+    );
 
-      // Send ACK
-      final ackMsg = {'command': 'FILE_TRANSFER_ACK', 'fileId': taskId};
+    // Send ACK
+    final ackMsg = {'command': 'FILE_TRANSFER_ACK', 'fileId': taskId};
 
+    debugPrint('📤 [FileTransferEngine] Sending ACK for: $taskId');
+    try {
       if (_connectionManager.server != null) {
         await _connectionManager.server!.sendMessage(ackMsg);
+        debugPrint('✅ [FileTransferEngine] ACK sent via server');
       } else if (_connectionManager.client != null) {
         await _connectionManager.client!.sendMessage(ackMsg);
+        debugPrint('✅ [FileTransferEngine] ACK sent via client');
+      } else {
+        debugPrint('❌ [FileTransferEngine] No connection to send ACK!');
       }
+    } catch (e) {
+      debugPrint('❌ [FileTransferEngine] Failed to send ACK: $e');
     }
   }
 
@@ -411,7 +475,10 @@ class FileTransferEngine {
   void _handleIncomingMessage(Map<String, dynamic> message) {
     final command = message['command'] as String?;
 
+    debugPrint('📥 [FileTransferEngine] Received message: $command');
+
     if (command == 'FILE_TRANSFER_ACK') {
+      debugPrint('🔔 [FileTransferEngine] ACK message detected!');
       _handleTransferAck(message);
       return;
     }
@@ -511,8 +578,8 @@ class FileTransferEngine {
 
   /// Handle file completion (Old logic fallback)
   void _handleFileComplete(Map<String, dynamic> message) {
-    final fileId = message['fileId'] as String;
     // We prefer TransferAck now, but this is backup
+    // final fileId = message['fileId'] as String;
     // _updateTaskStatus(fileId, TransferStatus.completed); // Disabled to enforce ACK check
   }
 
@@ -563,6 +630,28 @@ class FileTransferEngine {
 
     _activeTasks[taskId] = updatedTask;
     _taskUpdateController.add(updatedTask);
+
+    // Update foreground service notification (Android only)
+    if (Platform.isAndroid && TransferForegroundService.isRunning) {
+      final progress = (updatedTask.progress * 100).toInt();
+      final speedStr = _formatSpeed(speed);
+      TransferForegroundService.updateProgress(
+        fileName: updatedTask.fileMetadata.name,
+        progress: progress,
+        speed: speedStr,
+      );
+    }
+  }
+
+  /// Format speed for display
+  String _formatSpeed(double bytesPerSecond) {
+    if (bytesPerSecond < 1024) {
+      return '${bytesPerSecond.toStringAsFixed(0)} B/s';
+    }
+    if (bytesPerSecond < 1024 * 1024) {
+      return '${(bytesPerSecond / 1024).toStringAsFixed(1)} KB/s';
+    }
+    return '${(bytesPerSecond / (1024 * 1024)).toStringAsFixed(1)} MB/s';
   }
 
   String? _customSavePath;

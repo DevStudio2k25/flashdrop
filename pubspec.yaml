@@ -47,6 +47,10 @@ dependencies:
   # Bluetooth (Android only)
   flutter_bluetooth_serial: ^0.4.0
 
+  # Background Service (Android)
+  flutter_foreground_task: ^8.11.0
+  wakelock_plus: ^1.2.8
+
 
 dev_dependencies:
   flutter_test:
