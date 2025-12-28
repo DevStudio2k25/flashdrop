@@ -23,6 +23,10 @@ class FileTransferEngine {
   final Map<String, int> _receivedBytes = {};
   final Map<String, DateTime> _lastProgressUpdate = {};
 
+  // Write queues to prevent "async operation pending" on RandomAccessFile
+  final Map<String, List<List<int>>> _writeQueues = {};
+  final Map<String, bool> _isWriting = {};
+
   // Transfer queue
   final List<String> _sendQueue = [];
   bool _isSending = false;
@@ -195,6 +199,11 @@ class FileTransferEngine {
 
     try {
       while (bytesSent < fileSize) {
+        // Check cancellation
+        if (_activeTasks[taskId]?.status == TransferStatus.cancelled) {
+          break;
+        }
+
         final chunkSize = (fileSize - bytesSent) < NetworkConstants.chunkSize
             ? fileSize - bytesSent
             : NetworkConstants.chunkSize;
@@ -214,44 +223,134 @@ class FileTransferEngine {
         final elapsed = DateTime.now().difference(startTime).inMilliseconds;
         final speed = elapsed > 0 ? (bytesSent / elapsed) * 1000.0 : 0.0;
 
-        // Update progress (throttle to every 100ms)
+        // Update progress (throttle to every 200ms)
         final now = DateTime.now();
         final lastUpdate = _lastProgressUpdate[taskId];
         if (lastUpdate == null ||
-            now.difference(lastUpdate).inMilliseconds > 100) {
+            now.difference(lastUpdate).inMilliseconds > 200) {
           _updateTaskProgress(taskId, bytesSent, speed);
           _lastProgressUpdate[taskId] = now;
         }
-
-        debugPrint(
-          '📊 [FileTransferEngine] Progress: ${(bytesSent / fileSize * 100).toStringAsFixed(1)}%',
-        );
       }
 
       await randomAccessFile.close();
+      debugPrint(
+        '📤 [FileTransferEngine] All bytes sent. Waiting for receiver confirmation...',
+      );
 
-      // Send completion message
-      final completeMsg = {
-        'command': NetworkConstants.cmdFileComplete,
-        'fileId': taskId,
-      };
-
-      if (_connectionManager.server != null) {
-        await _connectionManager.server!.sendMessage(completeMsg);
-      } else if (_connectionManager.client != null) {
-        await _connectionManager.client!.sendMessage(completeMsg);
-      }
-
-      _updateTaskStatus(taskId, TransferStatus.completed);
+      // We do NOT mark complete here. We wait for ACK.
     } catch (e) {
       await randomAccessFile.close();
       rethrow;
     }
   }
 
+  // --- Receiver Logic ---
+
+  /// Listen for incoming file data
+  void _listenForFileData(String taskId) {
+    if (_writeQueues.containsKey(taskId)) return;
+
+    _writeQueues[taskId] = [];
+    _isWriting[taskId] = false;
+
+    void onData(List<int> data) {
+      if (!_activeTasks.containsKey(taskId)) return;
+      _writeQueues[taskId]?.add(data);
+      _processWriteQueue(taskId);
+    }
+
+    _connectionManager.server?.onData.listen(onData);
+    _connectionManager.client?.onData.listen(onData);
+  }
+
+  /// Process write queue sequentially to prevent concurrent write errors
+  Future<void> _processWriteQueue(String taskId) async {
+    if (_isWriting[taskId] == true) return;
+    _isWriting[taskId] = true;
+
+    try {
+      final queue = _writeQueues[taskId];
+      final file = _openFiles[taskId];
+      final task = _activeTasks[taskId];
+
+      if (queue == null || file == null || task == null) {
+        _isWriting[taskId] = false;
+        return;
+      }
+
+      while (queue.isNotEmpty) {
+        final data = queue.removeAt(0); // FIFO
+
+        await file.writeFrom(data);
+
+        _receivedBytes[taskId] = (_receivedBytes[taskId] ?? 0) + data.length;
+
+        // Progress Update
+        final bytesReceived = _receivedBytes[taskId]!;
+        final speed = 0.0;
+
+        final now = DateTime.now();
+        final lastUpdate = _lastProgressUpdate[taskId];
+        if (lastUpdate == null ||
+            now.difference(lastUpdate).inMilliseconds > 200) {
+          _updateTaskProgress(taskId, bytesReceived, speed);
+          _lastProgressUpdate[taskId] = now;
+        }
+
+        // Completion Check
+        if (bytesReceived >= task.fileMetadata.size) {
+          await _completeFileReception(taskId);
+          return; // Stop processing this task
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ [FileTransferEngine] Write/Queue error: $e');
+    } finally {
+      _isWriting[taskId] = false;
+      // Check if more items arrived while processing (recursively process rest)
+      if (_writeQueues[taskId] != null && _writeQueues[taskId]!.isNotEmpty) {
+        _processWriteQueue(taskId);
+      }
+    }
+  }
+
+  /// Complete file reception
+  Future<void> _completeFileReception(String taskId) async {
+    debugPrint('🏁 [FileTransferEngine] Bytes Downloaded. Finalizing...');
+
+    final file = _openFiles[taskId];
+    await file?.close();
+    _openFiles.remove(taskId);
+    _writeQueues.remove(taskId);
+
+    final task = _activeTasks[taskId];
+    if (task != null) {
+      _updateTaskStatus(taskId, TransferStatus.completed);
+      _fileReceivedController.add(task);
+      debugPrint(
+        '✅ [FileTransferEngine] File written to disk: ${task.fileMetadata.name}',
+      );
+
+      // Send ACK
+      final ackMsg = {'command': 'FILE_TRANSFER_ACK', 'fileId': taskId};
+
+      if (_connectionManager.server != null) {
+        await _connectionManager.server!.sendMessage(ackMsg);
+      } else if (_connectionManager.client != null) {
+        await _connectionManager.client!.sendMessage(ackMsg);
+      }
+    }
+  }
+
   /// Handle incoming messages
   void _handleIncomingMessage(Map<String, dynamic> message) {
     final command = message['command'] as String?;
+
+    if (command == 'FILE_TRANSFER_ACK') {
+      _handleTransferAck(message);
+      return;
+    }
 
     switch (command) {
       case NetworkConstants.cmdFileOffer:
@@ -290,7 +389,7 @@ class FileTransferEngine {
       _activeTasks[task.id] = task;
       _taskUpdateController.add(task);
 
-      // Auto-accept and prepare to receive
+      // Auto-accept
       await _acceptAndPrepareReceive(task);
     } catch (e) {
       debugPrint('❌ [FileTransferEngine] File offer failed: $e');
@@ -321,6 +420,7 @@ class FileTransferEngine {
       _openFiles[task.id] = randomAccessFile;
       _receivedBytes[task.id] = 0;
 
+      // Init Progress tracking
       _updateTaskStatus(task.id, TransferStatus.inProgress, savePath: filePath);
 
       debugPrint('📁 [FileTransferEngine] Ready to receive: $filePath');
@@ -332,61 +432,7 @@ class FileTransferEngine {
     }
   }
 
-  /// Listen for incoming file data
-  void _listenForFileData(String taskId) {
-    // Listen for raw data from server
-    _connectionManager.server?.onData.listen((data) {
-      _writeFileChunk(taskId, data);
-    });
-
-    // Listen for raw data from client
-    _connectionManager.client?.onData.listen((data) {
-      _writeFileChunk(taskId, data);
-    });
-  }
-
-  /// Write file chunk
-  Future<void> _writeFileChunk(String taskId, List<int> data) async {
-    final file = _openFiles[taskId];
-    final task = _activeTasks[taskId];
-
-    if (file == null || task == null) return;
-
-    try {
-      await file.writeFrom(data);
-      _receivedBytes[taskId] = (_receivedBytes[taskId] ?? 0) + data.length;
-
-      final bytesReceived = _receivedBytes[taskId]!;
-      final speed = 0.0; // Calculate from timing
-
-      _updateTaskProgress(taskId, bytesReceived, speed);
-
-      // Check if complete
-      if (bytesReceived >= task.fileMetadata.size) {
-        await _completeFileReception(taskId);
-      }
-    } catch (e) {
-      debugPrint('❌ [FileTransferEngine] Write chunk failed: $e');
-    }
-  }
-
-  /// Complete file reception
-  Future<void> _completeFileReception(String taskId) async {
-    final file = _openFiles[taskId];
-    await file?.close();
-    _openFiles.remove(taskId);
-
-    final task = _activeTasks[taskId];
-    if (task != null) {
-      _updateTaskStatus(taskId, TransferStatus.completed);
-      _fileReceivedController.add(task);
-      debugPrint(
-        '✅ [FileTransferEngine] File received: ${task.fileMetadata.name}',
-      );
-    }
-  }
-
-  /// Handle file acceptance
+  /// Handle file acceptance (Sender side)
   void _handleFileAccept(Map<String, dynamic> message) {
     final fileId = message['fileId'] as String;
     _updateTaskStatus(fileId, TransferStatus.inProgress);
@@ -399,9 +445,17 @@ class FileTransferEngine {
     _updateTaskStatus(fileId, TransferStatus.cancelled);
   }
 
-  /// Handle file completion
+  /// Handle file completion (Old logic fallback)
   void _handleFileComplete(Map<String, dynamic> message) {
     final fileId = message['fileId'] as String;
+    // We prefer TransferAck now, but this is backup
+    // _updateTaskStatus(fileId, TransferStatus.completed); // Disabled to enforce ACK check
+  }
+
+  // Handle ACK from receiver (Sender side confirmation)
+  void _handleTransferAck(Map<String, dynamic> message) {
+    final fileId = message['fileId'] as String;
+    debugPrint('✅ [FileTransferEngine] Receiver confirmed: $fileId');
     _updateTaskStatus(fileId, TransferStatus.completed);
   }
 
@@ -414,6 +468,9 @@ class FileTransferEngine {
   }) {
     final task = _activeTasks[taskId];
     if (task == null) return;
+
+    // Prevent overwriting completion unless explicit
+    if ((task.isComplete) && status != TransferStatus.completed) return;
 
     final updatedTask = task.copyWith(
       status: status,
@@ -431,7 +488,6 @@ class FileTransferEngine {
     _taskUpdateController.add(updatedTask);
   }
 
-  /// Update task progress
   void _updateTaskProgress(String taskId, int bytesTransferred, double speed) {
     final task = _activeTasks[taskId];
     if (task == null) return;
@@ -483,7 +539,7 @@ class FileTransferEngine {
         debugPrint(
           '⚠️ [FileTransferEngine] Failed to create FlashDrop folder: $e',
         );
-        // Fallback to root Downloads if creation fails
+        // Fallback
         if (Platform.isAndroid) {
           return Directory('/storage/emulated/0/Download');
         } else {
