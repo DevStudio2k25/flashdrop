@@ -152,7 +152,12 @@ class TcpServer {
       final json = jsonEncode(message);
       final data = utf8.encode(json + NetworkConstants.messageDelimiter);
       _clientSocket!.add(data);
-      await _clientSocket!.flush();
+      await _clientSocket!.flush().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('⚠️ [TcpServer] Flush timeout for message');
+        },
+      );
     } catch (e) {
       debugPrint('❌ [TcpServer] Failed to send message: $e');
       rethrow;
@@ -167,7 +172,12 @@ class TcpServer {
 
     try {
       _clientSocket!.add(data);
-      await _clientSocket!.flush();
+      await _clientSocket!.flush().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('⚠️ [TcpServer] Flush timeout for data');
+        },
+      );
     } catch (e) {
       debugPrint('❌ [TcpServer] Failed to send data: $e');
       rethrow;

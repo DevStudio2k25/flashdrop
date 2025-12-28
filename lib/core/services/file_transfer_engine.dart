@@ -146,19 +146,54 @@ class FileTransferEngine {
         .toList();
 
     if (sentTasks.isNotEmpty) {
-      // Wait max 30 seconds for all ACKs
+      // Calculate dynamic timeout based on actual transfer speed
+      // Use CONSERVATIVE approach: minimum speed + 50% buffer
+      // This handles fluctuating network speeds
+      final totalBytes = sentTasks.fold<int>(
+        0,
+        (sum, task) => sum + task.fileMetadata.size,
+      );
+
+      // Find MINIMUM speed (worst case) instead of average
+      double minSpeed = double.infinity;
+      for (final task in sentTasks) {
+        if (task.speed > 0 && task.speed < minSpeed) {
+          minSpeed = task.speed;
+        }
+      }
+
+      // Use minimum speed if available, otherwise assume 2 MB/s (very conservative)
+      final effectiveSpeed = minSpeed != double.infinity
+          ? minSpeed
+          : 2 * 1024 * 1024; // 2 MB/s default (very conservative)
+
+      // Calculate timeout with 50% buffer for verification + ACK + speed fluctuation
+      final estimatedSeconds = (totalBytes / effectiveSpeed * 1.5).ceil();
+      final timeoutSeconds = 60 + estimatedSeconds; // Base 60s + estimated time
+
+      debugPrint(
+        '⏱️ [FileTransferEngine] ACK timeout: $timeoutSeconds sec for ${_formatBytes(totalBytes)} @ ${_formatSpeed(effectiveSpeed.toDouble())} (min speed)',
+      );
+
+      // Store task IDs to wait for (ONLY current batch)
+      final waitingTaskIds = sentTasks.map((t) => t.id).toSet();
+
       final startWait = DateTime.now();
-      while (sentTasks.any((t) => t.status == TransferStatus.verifying)) {
+      while (waitingTaskIds.any((id) {
+        final task = _activeTasks[id];
+        return task != null && task.status == TransferStatus.verifying;
+      })) {
         await Future.delayed(const Duration(milliseconds: 100));
 
-        // Timeout after 30 seconds
-        if (DateTime.now().difference(startWait).inSeconds > 30) {
+        // Dynamic timeout
+        if (DateTime.now().difference(startWait).inSeconds > timeoutSeconds) {
           debugPrint(
-            '⚠️ [FileTransferEngine] ACK timeout, marking as complete',
+            '⚠️ [FileTransferEngine] ACK timeout after $timeoutSeconds seconds, marking as complete',
           );
-          for (final task in sentTasks) {
-            if (task.status == TransferStatus.verifying) {
-              _updateTaskStatus(task.id, TransferStatus.completed);
+          for (final taskId in waitingTaskIds) {
+            final task = _activeTasks[taskId];
+            if (task != null && task.status == TransferStatus.verifying) {
+              _updateTaskStatus(taskId, TransferStatus.completed);
             }
           }
           break;
@@ -398,8 +433,13 @@ class FileTransferEngine {
     // Update status to VERIFYING (UI shows "Verifying...")
     _updateTaskStatus(taskId, TransferStatus.verifying);
 
+    // CRITICAL: Flush and close file to ensure all data is written to disk
     final fileRef = _openFiles[taskId];
-    await fileRef?.close();
+    if (fileRef != null) {
+      await fileRef.flush(); // Ensure all buffered data is written
+      await fileRef.close();
+      debugPrint('💾 [FileTransferEngine] File flushed and closed: $taskId');
+    }
     _openFiles.remove(taskId);
     _writeQueues.remove(taskId);
 
@@ -652,6 +692,20 @@ class FileTransferEngine {
       return '${(bytesPerSecond / 1024).toStringAsFixed(1)} KB/s';
     }
     return '${(bytesPerSecond / (1024 * 1024)).toStringAsFixed(1)} MB/s';
+  }
+
+  /// Format bytes for display
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) {
+      return '$bytes B';
+    }
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
   String? _customSavePath;
